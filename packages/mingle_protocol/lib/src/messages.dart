@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'emote.dart';
 import 'player_state.dart';
 
 /// Thrown when an incoming frame is not a valid protocol message.
@@ -29,6 +30,12 @@ T _field<T>(Map<String, Object?> json, String key) {
   return value;
 }
 
+Emote _emote(Map<String, Object?> json) {
+  final name = _field<String>(json, 'e');
+  return Emote.tryParse(name) ??
+      (throw ProtocolException('unknown emote: $name'));
+}
+
 double _number(Map<String, Object?> json, String key) {
   final value = _field<num>(json, key).toDouble();
   if (!value.isFinite) throw ProtocolException('"$key" must be finite');
@@ -51,6 +58,7 @@ sealed class ClientMessage {
       'join' => JoinMessage(_field<String>(json, 'name')),
       'move' => MoveMessage(_number(json, 'x'), _number(json, 'y')),
       'chat' => ChatMessage(_field<String>(json, 'text')),
+      'emote' => EmoteMessage(_emote(json)),
       final t => throw ProtocolException('unknown client message type: $t'),
     };
   }
@@ -80,6 +88,13 @@ class ChatMessage extends ClientMessage {
   Map<String, Object?> toJson() => {'t': 'chat', 'text': text};
 }
 
+class EmoteMessage extends ClientMessage {
+  const EmoteMessage(this.emote);
+  final Emote emote;
+  @override
+  Map<String, Object?> toJson() => {'t': 'emote', 'e': emote.name};
+}
+
 // ---------------------------------------------------------------------------
 // Server -> client
 // ---------------------------------------------------------------------------
@@ -95,18 +110,28 @@ sealed class ServerMessage {
     try {
       return switch (json['t']) {
         'welcome' => WelcomeMessage(
-            selfId: _field<String>(json, 'selfId'),
-            players: _field<List<Object?>>(json, 'players')
-                .map((p) => PlayerState.fromJson(p as Map<String, Object?>))
-                .toList(),
-          ),
-        'joined' => PlayerJoinedMessage(PlayerState.fromJson(
-            _field<Map<String, Object?>>(json, 'player'))),
+          selfId: _field<String>(json, 'selfId'),
+          players: _field<List<Object?>>(json, 'players')
+              .map((p) => PlayerState.fromJson(p as Map<String, Object?>))
+              .toList(),
+        ),
+        'joined' => PlayerJoinedMessage(
+          PlayerState.fromJson(_field<Map<String, Object?>>(json, 'player')),
+        ),
         'left' => PlayerLeftMessage(_field<String>(json, 'id')),
         'moved' => PlayerMovedMessage(
-            _field<String>(json, 'id'), _number(json, 'x'), _number(json, 'y')),
+          _field<String>(json, 'id'),
+          _number(json, 'x'),
+          _number(json, 'y'),
+        ),
         'chat' => PlayerChatMessage(
-            _field<String>(json, 'id'), _field<String>(json, 'text')),
+          _field<String>(json, 'id'),
+          _field<String>(json, 'text'),
+        ),
+        'emoted' => PlayerEmotedMessage(
+          _field<String>(json, 'id'),
+          _emote(json),
+        ),
         'error' => ErrorMessage(_field<String>(json, 'reason')),
         final t => throw ProtocolException('unknown server message type: $t'),
       };
@@ -126,10 +151,10 @@ class WelcomeMessage extends ServerMessage {
 
   @override
   Map<String, Object?> toJson() => {
-        't': 'welcome',
-        'selfId': selfId,
-        'players': [for (final p in players) p.toJson()],
-      };
+    't': 'welcome',
+    'selfId': selfId,
+    'players': [for (final p in players) p.toJson()],
+  };
 }
 
 class PlayerJoinedMessage extends ServerMessage {
@@ -162,6 +187,14 @@ class PlayerChatMessage extends ServerMessage {
   final String text;
   @override
   Map<String, Object?> toJson() => {'t': 'chat', 'id': id, 'text': text};
+}
+
+class PlayerEmotedMessage extends ServerMessage {
+  const PlayerEmotedMessage(this.id, this.emote);
+  final String id;
+  final Emote emote;
+  @override
+  Map<String, Object?> toJson() => {'t': 'emoted', 'id': id, 'e': emote.name};
 }
 
 class ErrorMessage extends ServerMessage {

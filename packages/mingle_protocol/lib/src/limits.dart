@@ -5,3 +5,9 @@ abstract final class Limits {
   static const int maxNameLength = 16;
   static const int maxChatLength = 100;
 }
+
+/// Rate limit for social actions (chat + emote) per player.
+abstract final class SocialRateLimit {
+  static const int burst = 5;
+  static const Duration window = Duration(seconds: 5);
+}

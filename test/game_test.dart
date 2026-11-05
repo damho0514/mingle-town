@@ -1,9 +1,11 @@
 import 'package:flame/components.dart';
+import 'package:flame/effects.dart';
 import 'package:flame_test/flame_test.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mingle_protocol/mingle_protocol.dart';
 import 'package:mingle_town/game/character.dart';
 import 'package:mingle_town/game/mingle_town_game.dart';
+import 'package:mingle_town/game/tree.dart';
 
 import 'fake_connection.dart';
 
@@ -38,6 +40,7 @@ void main() {
     expect(game.self!.isSelf, isTrue);
     expect(game.characters['p2']!.isSelf, isFalse);
     expect(game.world.children.whereType<Character>().length, 2);
+    expect(game.playerCount.value, 2);
   });
 
   testWithGame('remote moves animate, own echoes are ignored', create, (
@@ -82,6 +85,64 @@ void main() {
     await game.ready();
     expect(game.characters, isNot(contains('p2')));
     expect(game.world.children.whereType<Character>().length, 2);
+    expect(game.playerCount.value, 2);
+  });
+
+  testWithGame('emotes pop up above the character and send to server', create, (
+    game,
+  ) async {
+    await welcome(game);
+    game.handleMessage(const PlayerEmotedMessage('p2', Emote.party));
+    await game.ready();
+    final pops = game.characters['p2']!.children
+        .whereType<TextComponent>()
+        .where((t) => t.text == Character.emojiFor(Emote.party));
+    expect(pops, hasLength(1));
+    expect(pops.single.children.whereType<RemoveEffect>(), hasLength(1));
+
+    game.sendEmote(Emote.wave);
+    expect((conn.sent.last as EmoteMessage).emote, Emote.wave);
+  });
+
+  test('camera centres on the player but never shows outside the world', () {
+    final view = Vector2(400, 800);
+    expect(
+      MingleTownGame.cameraTarget(Vector2(800, 820), view),
+      Vector2(800, 800),
+    );
+    expect(
+      MingleTownGame.cameraTarget(Vector2(10, 10), view),
+      Vector2(200, 400),
+    );
+    expect(
+      MingleTownGame.cameraTarget(
+        Vector2(Limits.worldWidth, Limits.worldHeight),
+        view,
+      ),
+      Vector2(Limits.worldWidth - 200, Limits.worldHeight - 400),
+    );
+    // A view larger than the world just centres it.
+    expect(
+      MingleTownGame.cameraTarget(Vector2(10, 10), Vector2.all(5000)),
+      Vector2(Limits.worldWidth / 2, Limits.worldHeight / 2),
+    );
+  });
+
+  testWithGame('camera tracks the local player', create, (game) async {
+    await welcome(game);
+    game.update(0);
+    expect(
+      game.camera.viewfinder.position,
+      MingleTownGame.cameraTarget(
+        game.self!.position,
+        game.camera.viewport.virtualSize,
+      ),
+    );
+  });
+
+  testWithGame('scenery is loaded into the world', create, (game) async {
+    await game.ready();
+    expect(game.world.children.whereType<Tree>(), isNotEmpty);
   });
 
   testWithGame('sendChat trims and skips blanks', create, (game) async {

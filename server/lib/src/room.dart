@@ -8,9 +8,12 @@ typedef SendFn = void Function(ServerMessage message);
 ///
 /// Transport-agnostic: each connection is a [Session] created by [connect].
 class Room {
-  Room({Random? random}) : _random = random ?? Random();
+  Room({Random? random, DateTime Function()? clock})
+    : _random = random ?? Random(),
+      _clock = clock ?? DateTime.now;
 
   final Random _random;
+  final DateTime Function() _clock;
   final Map<String, Session> _joined = {};
   int _nextId = 1;
 
@@ -34,12 +37,15 @@ class Room {
 
   void _join(Session session, String rawName) {
     final id = 'p${_nextId++}';
+    // Spawn on a ring around the central plaza's fountain.
+    final angle = _random.nextDouble() * 2 * pi;
+    final distance = 90 + _random.nextDouble() * 70;
     final player = PlayerState(
       id: id,
       name: _sanitizeName(rawName, id),
       color: _palette[_random.nextInt(_palette.length)],
-      x: Limits.worldWidth / 2 + _random.nextDouble() * 200 - 100,
-      y: Limits.worldHeight / 2 + _random.nextDouble() * 200 - 100,
+      x: Limits.worldWidth / 2 + cos(angle) * distance,
+      y: Limits.worldHeight / 2 + sin(angle) * distance,
     );
     session._player = player;
     _joined[id] = session;
@@ -69,6 +75,10 @@ class Room {
     final text = _truncate(rawText.trim(), Limits.maxChatLength);
     if (text.isEmpty) return;
     _broadcast(PlayerChatMessage(session._player!.id, text));
+  }
+
+  void _emote(Session session, Emote emote) {
+    _broadcast(PlayerEmotedMessage(session._player!.id, emote));
   }
 
   void _leave(Session session) {
@@ -106,6 +116,7 @@ class Session {
   final SendFn _send;
   PlayerState? _player;
   bool _closed = false;
+  final List<DateTime> _recentSocial = [];
 
   PlayerState? get player => _player;
 
@@ -134,10 +145,26 @@ class Session {
       case MoveMessage(:final x, :final y) when _player != null:
         _room._move(this, x, y);
       case ChatMessage(:final text) when _player != null:
-        _room._chat(this, text);
-      case MoveMessage() || ChatMessage():
+        if (_allowSocial()) _room._chat(this, text);
+      case EmoteMessage(:final emote) when _player != null:
+        if (_allowSocial()) _room._emote(this, emote);
+      case MoveMessage() || ChatMessage() || EmoteMessage():
         _send(const ErrorMessage('join first'));
     }
+  }
+
+  /// Sliding-window limit on chat + emotes so one client can't flood the room.
+  bool _allowSocial() {
+    final now = _room._clock();
+    _recentSocial.removeWhere(
+      (t) => now.difference(t) >= SocialRateLimit.window,
+    );
+    if (_recentSocial.length >= SocialRateLimit.burst) {
+      _send(const ErrorMessage('slow down'));
+      return false;
+    }
+    _recentSocial.add(now);
+    return true;
   }
 
   /// Call when the underlying connection ends. Idempotent.

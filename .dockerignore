@@ -1,0 +1,8 @@
+**/.dart_tool
+**/build
+android
+ios
+web
+lib
+test
+.github

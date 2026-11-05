@@ -17,23 +17,28 @@ class PlayerState {
   final double y;
 
   PlayerState copyWith({double? x, double? y}) => PlayerState(
-        id: id,
-        name: name,
-        color: color,
-        x: x ?? this.x,
-        y: y ?? this.y,
-      );
+    id: id,
+    name: name,
+    color: color,
+    x: x ?? this.x,
+    y: y ?? this.y,
+  );
 
-  Map<String, Object?> toJson() =>
-      {'id': id, 'name': name, 'color': color, 'x': x, 'y': y};
+  Map<String, Object?> toJson() => {
+    'id': id,
+    'name': name,
+    'color': color,
+    'x': x,
+    'y': y,
+  };
 
   static PlayerState fromJson(Map<String, Object?> json) => PlayerState(
-        id: json['id'] as String,
-        name: json['name'] as String,
-        color: json['color'] as int,
-        x: (json['x'] as num).toDouble(),
-        y: (json['y'] as num).toDouble(),
-      );
+    id: json['id'] as String,
+    name: json['name'] as String,
+    color: json['color'] as int,
+    x: (json['x'] as num).toDouble(),
+    y: (json['y'] as num).toDouble(),
+  );
 
   @override
   bool operator ==(Object other) =>

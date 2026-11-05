@@ -2,22 +2,34 @@ import 'package:mingle_protocol/mingle_protocol.dart';
 import 'package:test/test.dart';
 
 void main() {
-  const alice =
-      PlayerState(id: 'p1', name: 'alice', color: 0xFFFF7043, x: 10, y: 20.5);
+  const alice = PlayerState(
+    id: 'p1',
+    name: 'alice',
+    color: 0xFFFF7043,
+    x: 10,
+    y: 20.5,
+  );
 
   group('ClientMessage', () {
     test('round-trips every type', () {
-      final join =
-          ClientMessage.decode(const JoinMessage('bob').encode()) as JoinMessage;
+      final join = ClientMessage.decode(
+        const JoinMessage('bob').encode(),
+      ) as JoinMessage;
       expect(join.name, 'bob');
 
-      final move =
-          ClientMessage.decode(const MoveMessage(1, 2.5).encode()) as MoveMessage;
+      final move = ClientMessage.decode(
+        const MoveMessage(1, 2.5).encode(),
+      ) as MoveMessage;
       expect((move.x, move.y), (1.0, 2.5));
 
       final chat =
           ClientMessage.decode(const ChatMessage('hi').encode()) as ChatMessage;
       expect(chat.text, 'hi');
+
+      final emote = ClientMessage.decode(
+        const EmoteMessage(Emote.heart).encode(),
+      ) as EmoteMessage;
+      expect(emote.emote, Emote.heart);
     });
 
     test('accepts integer coordinates', () {
@@ -33,9 +45,13 @@ void main() {
         '{"t":"join"}',
         '{"t":"join","name":5}',
         '{"t":"move","x":"1","y":2}',
+        '{"t":"emote","e":"nope"}',
       ]) {
-        expect(() => ClientMessage.decode(raw), throwsA(isA<ProtocolException>()),
-            reason: raw);
+        expect(
+          () => ClientMessage.decode(raw),
+          throwsA(isA<ProtocolException>()),
+          reason: raw,
+        );
       }
     });
   });
@@ -43,40 +59,51 @@ void main() {
   group('ServerMessage', () {
     test('round-trips every type', () {
       final welcome = ServerMessage.decode(
-              const WelcomeMessage(selfId: 'p1', players: [alice]).encode())
-          as WelcomeMessage;
+        const WelcomeMessage(selfId: 'p1', players: [alice]).encode(),
+      ) as WelcomeMessage;
       expect(welcome.selfId, 'p1');
       expect(welcome.players, [alice]);
 
-      final joined = ServerMessage.decode(const PlayerJoinedMessage(alice).encode())
-          as PlayerJoinedMessage;
+      final joined = ServerMessage.decode(
+        const PlayerJoinedMessage(alice).encode(),
+      ) as PlayerJoinedMessage;
       expect(joined.player, alice);
 
       expect(
-          (ServerMessage.decode(const PlayerLeftMessage('p1').encode())
-                  as PlayerLeftMessage)
-              .id,
-          'p1');
+        (ServerMessage.decode(
+          const PlayerLeftMessage('p1').encode(),
+        ) as PlayerLeftMessage).id,
+        'p1',
+      );
 
       final moved = ServerMessage.decode(
-          const PlayerMovedMessage('p1', 5, 6).encode()) as PlayerMovedMessage;
+        const PlayerMovedMessage('p1', 5, 6).encode(),
+      ) as PlayerMovedMessage;
       expect((moved.id, moved.x, moved.y), ('p1', 5.0, 6.0));
 
       final chat = ServerMessage.decode(
-          const PlayerChatMessage('p1', 'yo').encode()) as PlayerChatMessage;
+        const PlayerChatMessage('p1', 'yo').encode(),
+      ) as PlayerChatMessage;
       expect((chat.id, chat.text), ('p1', 'yo'));
 
+      final emoted = ServerMessage.decode(
+        const PlayerEmotedMessage('p1', Emote.party).encode(),
+      ) as PlayerEmotedMessage;
+      expect((emoted.id, emoted.emote), ('p1', Emote.party));
+
       expect(
-          (ServerMessage.decode(const ErrorMessage('bad').encode())
-                  as ErrorMessage)
-              .reason,
-          'bad');
+        (ServerMessage.decode(
+          const ErrorMessage('bad').encode(),
+        ) as ErrorMessage).reason,
+        'bad',
+      );
     });
 
     test('rejects malformed players', () {
       expect(
-          () => ServerMessage.decode('{"t":"joined","player":{"id":1}}'),
-          throwsA(isA<ProtocolException>()));
+        () => ServerMessage.decode('{"t":"joined","player":{"id":1}}'),
+        throwsA(isA<ProtocolException>()),
+      );
     });
   });
 }

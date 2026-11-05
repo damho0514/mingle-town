@@ -65,6 +65,40 @@ void main() {
     expect(b.inbox.length, before, reason: 'blank chat is dropped');
   });
 
+  test('emotes are broadcast to everyone', () {
+    final a = FakeClient(room)..send(const JoinMessage('alice'));
+    final b = FakeClient(room)..send(const JoinMessage('bob'));
+
+    a.send(const EmoteMessage(Emote.wave));
+    for (final c in [a, b]) {
+      final m = c.last<PlayerEmotedMessage>();
+      expect((m.id, m.emote), (a.session.player!.id, Emote.wave));
+    }
+  });
+
+  test('chat and emotes share a sliding-window rate limit', () {
+    var now = DateTime(2026);
+    room = Room(random: Random(1), clock: () => now);
+    final a = FakeClient(room)..send(const JoinMessage('alice'));
+    final b = FakeClient(room)..send(const JoinMessage('bob'));
+
+    for (var i = 0; i < SocialRateLimit.burst; i++) {
+      a.send(i.isEven ? ChatMessage('m$i') : const EmoteMessage(Emote.heart));
+    }
+    int social() => b.inbox
+        .where((m) => m is PlayerChatMessage || m is PlayerEmotedMessage)
+        .length;
+    expect(social(), SocialRateLimit.burst);
+
+    a.send(const ChatMessage('too much'));
+    expect(social(), SocialRateLimit.burst);
+    expect(a.last<ErrorMessage>().reason, 'slow down');
+
+    now = now.add(SocialRateLimit.window);
+    a.send(const ChatMessage('ok again'));
+    expect(b.last<PlayerChatMessage>().text, 'ok again');
+  });
+
   test('names are sanitized', () {
     final a = FakeClient(room)..send(const JoinMessage('   '));
     expect(a.session.player!.name, startsWith('guest-'));
