@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:mingle_protocol/mingle_protocol.dart';
@@ -44,6 +45,23 @@ void main() {
       Uri.parse('http://127.0.0.1:${server.port}/healthz'),
     )).close();
     expect(res.statusCode, 200);
+    client.close();
+  });
+
+  test('rooms endpoint lists occupancy with CORS', () async {
+    final client = HttpClient();
+    final res = await (await client.getUrl(
+      Uri.parse('http://127.0.0.1:${server.port}/rooms'),
+    )).close();
+    expect(res.statusCode, 200);
+    expect(res.headers.value('access-control-allow-origin'), '*');
+    final body = jsonDecode(
+      await res.transform(utf8.decoder).join(),
+    ) as Map<String, Object?>;
+    final rooms = (body['rooms'] as List).map(
+      (r) => RoomInfo.fromJson(r as Map<String, Object?>),
+    );
+    expect(rooms.map((r) => r.id), Rooms.ids);
     client.close();
   });
 

@@ -1,7 +1,10 @@
 import 'dart:convert';
 
+import 'appearance.dart';
 import 'emote.dart';
 import 'player_state.dart';
+import 'rooms.dart';
+import 'tag.dart';
 
 /// Thrown when an incoming frame is not a valid protocol message.
 class ProtocolException implements Exception {
@@ -30,6 +33,13 @@ T _field<T>(Map<String, Object?> json, String key) {
   return value;
 }
 
+T? _optional<T>(Map<String, Object?> json, String key) {
+  final value = json[key];
+  if (value == null) return null;
+  if (value is T) return value as T;
+  throw ProtocolException('invalid "$key"');
+}
+
 Emote _emote(Map<String, Object?> json) {
   final name = _field<String>(json, 'e');
   return Emote.tryParse(name) ??
@@ -55,10 +65,16 @@ sealed class ClientMessage {
   static ClientMessage decode(String raw) {
     final json = _decodeObject(raw);
     return switch (json['t']) {
-      'join' => JoinMessage(_field<String>(json, 'name')),
+      'join' => JoinMessage(
+        _field<String>(json, 'name'),
+        room: _optional<String>(json, 'room') ?? Rooms.defaultId,
+        color: _optional<int>(json, 'color'),
+        hat: Hat.tryParse(_optional<String>(json, 'hat') ?? '') ?? Hat.none,
+      ),
       'move' => MoveMessage(_number(json, 'x'), _number(json, 'y')),
       'chat' => ChatMessage(_field<String>(json, 'text')),
       'emote' => EmoteMessage(_emote(json)),
+      'startTag' => const StartTagMessage(),
       final t => throw ProtocolException('unknown client message type: $t'),
     };
   }
@@ -66,13 +82,30 @@ sealed class ClientMessage {
 
 /// First message a client must send.
 class JoinMessage extends ClientMessage {
-  const JoinMessage(this.name);
+  const JoinMessage(
+    this.name, {
+    this.room = Rooms.defaultId,
+    this.color,
+    this.hat = Hat.none,
+  });
   final String name;
+  final String room;
+
+  /// Preferred body colour from [Palette]; the server picks one if invalid.
+  final int? color;
+  final Hat hat;
+
   @override
-  Map<String, Object?> toJson() => {'t': 'join', 'name': name};
+  Map<String, Object?> toJson() => {
+    't': 'join',
+    'name': name,
+    'room': room,
+    'color': ?color,
+    'hat': hat.name,
+  };
 }
 
-/// Request to walk to a world position.
+/// The sender's current position (streamed while walking).
 class MoveMessage extends ClientMessage {
   const MoveMessage(this.x, this.y);
   final double x;
@@ -95,6 +128,13 @@ class EmoteMessage extends ClientMessage {
   Map<String, Object?> toJson() => {'t': 'emote', 'e': emote.name};
 }
 
+/// Ask the server to start a round of tag in the current room.
+class StartTagMessage extends ClientMessage {
+  const StartTagMessage();
+  @override
+  Map<String, Object?> toJson() => {'t': 'startTag'};
+}
+
 // ---------------------------------------------------------------------------
 // Server -> client
 // ---------------------------------------------------------------------------
@@ -111,9 +151,14 @@ sealed class ServerMessage {
       return switch (json['t']) {
         'welcome' => WelcomeMessage(
           selfId: _field<String>(json, 'selfId'),
+          room: _optional<String>(json, 'room') ?? Rooms.defaultId,
           players: _field<List<Object?>>(json, 'players')
               .map((p) => PlayerState.fromJson(p as Map<String, Object?>))
               .toList(),
+          tag: switch (_optional<Map<String, Object?>>(json, 'tag')) {
+            null => null,
+            final t => TagMessage._fromJson(t),
+          },
         ),
         'joined' => PlayerJoinedMessage(
           PlayerState.fromJson(_field<Map<String, Object?>>(json, 'player')),
@@ -132,6 +177,7 @@ sealed class ServerMessage {
           _field<String>(json, 'id'),
           _emote(json),
         ),
+        'tag' => TagMessage._fromJson(json),
         'error' => ErrorMessage(_field<String>(json, 'reason')),
         final t => throw ProtocolException('unknown server message type: $t'),
       };
@@ -143,17 +189,28 @@ sealed class ServerMessage {
 
 /// Sent once after a successful join: who you are and who is already here.
 class WelcomeMessage extends ServerMessage {
-  const WelcomeMessage({required this.selfId, required this.players});
+  const WelcomeMessage({
+    required this.selfId,
+    required this.players,
+    this.room = Rooms.defaultId,
+    this.tag,
+  });
   final String selfId;
+  final String room;
 
   /// Everyone in the room, including yourself.
   final List<PlayerState> players;
+
+  /// The tag round in progress, if any.
+  final TagMessage? tag;
 
   @override
   Map<String, Object?> toJson() => {
     't': 'welcome',
     'selfId': selfId,
+    'room': room,
     'players': [for (final p in players) p.toJson()],
+    'tag': ?tag?.toJson(),
   };
 }
 
@@ -171,7 +228,7 @@ class PlayerLeftMessage extends ServerMessage {
   Map<String, Object?> toJson() => {'t': 'left', 'id': id};
 }
 
-/// A player started walking to (x, y).
+/// A player's latest position.
 class PlayerMovedMessage extends ServerMessage {
   const PlayerMovedMessage(this.id, this.x, this.y);
   final String id;
@@ -195,6 +252,47 @@ class PlayerEmotedMessage extends ServerMessage {
   final Emote emote;
   @override
   Map<String, Object?> toJson() => {'t': 'emoted', 'id': id, 'e': emote.name};
+}
+
+/// Tag round updates.
+///
+/// - [TagPhase.started]: [itId] is the first tagger.
+/// - [TagPhase.tagged]: [byId] tagged [itId], who is now "it".
+/// - [TagPhase.ended]: time is up; [itId] (if any) lost.
+class TagMessage extends ServerMessage {
+  const TagMessage({
+    required this.phase,
+    this.itId,
+    this.byId,
+    this.remainingMs = 0,
+  });
+
+  final TagPhase phase;
+  final String? itId;
+  final String? byId;
+  final int remainingMs;
+
+  static TagMessage _fromJson(Map<String, Object?> json) {
+    final phaseName = _field<String>(json, 'phase');
+    final phase =
+        TagPhase.values.where((p) => p.name == phaseName).firstOrNull ??
+        (throw ProtocolException('unknown tag phase: $phaseName'));
+    return TagMessage(
+      phase: phase,
+      itId: _optional<String>(json, 'itId'),
+      byId: _optional<String>(json, 'byId'),
+      remainingMs: _optional<int>(json, 'remainingMs') ?? 0,
+    );
+  }
+
+  @override
+  Map<String, Object?> toJson() => {
+    't': 'tag',
+    'phase': phase.name,
+    'itId': ?itId,
+    'byId': ?byId,
+    'remainingMs': remainingMs,
+  };
 }
 
 class ErrorMessage extends ServerMessage {

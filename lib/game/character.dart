@@ -5,49 +5,83 @@ import 'package:flame/effects.dart';
 import 'package:flutter/material.dart';
 import 'package:mingle_protocol/mingle_protocol.dart';
 
+import 'avatar_painter.dart';
+
 /// A player's avatar: painted body with a walk cycle, name tag, chat bubble
 /// and emote pop-ups. [position] is where the feet touch the ground.
+///
+/// The local player is driven by [input] (keyboard / joystick) or [moveTo]
+/// (tap) and collides with the [map]. Remote players follow network updates
+/// via [syncTo].
 class Character extends PositionComponent {
-  Character({required PlayerState state, this.isSelf = false})
+  Character({required PlayerState state, this.isSelf = false, this.map})
     : name = state.name,
-      color = Color(state.color),
+      avatar = AvatarPainter(color: Color(state.color), hat: state.hat),
       super(
         position: Vector2(state.x, state.y),
-        size: Vector2(36, 52),
+        size: Vector2(AvatarPainter.size.width, AvatarPainter.size.height),
         anchor: Anchor.bottomCenter,
         priority: state.y.round(),
       );
 
-  static const double speed = 200;
-
   /// Walk-cycle radians per second.
   static const double _stride = 14;
 
+  /// Remote players further than this from their reported position snap.
+  static const double snapDistance = 300;
+
   final String name;
-  final Color color;
+  final AvatarPainter avatar;
   final bool isSelf;
 
+  /// Collision map; null for remote players (the server already resolved).
+  final WorldMap? map;
+
+  /// Desired walking direction from keyboard/joystick (length 0..1).
+  final Vector2 input = Vector2.zero();
+
   Vector2? _target;
+  double _speed = Limits.walkSpeed;
+  double _stuck = 0;
   ChatBubble? _bubble;
+  TextComponent? _itBadge;
   double _phase = 0;
 
   /// -1 facing left, 1 facing right.
   double facing = 1;
 
-  bool get isMoving => _target != null;
+  /// Whether the character actually moved this frame.
+  bool walking = false;
 
-  late final Paint _body = Paint()..color = color;
-  late final Paint _hair = Paint()
-    ..color = Color.lerp(color, Colors.black, 0.45)!;
-  static final _skin = Paint()..color = const Color(0xFFFFDDB8);
-  static final _legs = Paint()..color = const Color(0xFF37474F);
-  static final _eyes = Paint()..color = const Color(0xFF263238);
-  static final _blush = Paint()..color = const Color(0x55FF8A80);
-  static final _shadow = Paint()..color = const Color(0x33000000);
-  static final _ring = Paint()
-    ..color = Colors.white
-    ..style = PaintingStyle.stroke
-    ..strokeWidth = 2.5;
+  bool get isMoving => _target != null || input.length2 > 0;
+
+  bool _isIt = false;
+  bool get isIt => _isIt;
+  set isIt(bool value) {
+    if (_isIt == value) return;
+    _isIt = value;
+    if (value) {
+      add(
+        _itBadge = TextComponent(
+          text: '술래',
+          position: Vector2(size.x / 2, -14),
+          anchor: Anchor.bottomCenter,
+          priority: 1,
+          textRenderer: TextPaint(
+            style: const TextStyle(
+              color: Color(0xFFFF1744),
+              fontSize: 12,
+              fontWeight: FontWeight.w900,
+              shadows: [Shadow(color: Colors.white, blurRadius: 3)],
+            ),
+          ),
+        ),
+      );
+    } else {
+      _itBadge?.removeFromParent();
+      _itBadge = null;
+    }
+  }
 
   @override
   Future<void> onLoad() async {
@@ -68,16 +102,35 @@ class Character extends PositionComponent {
     );
   }
 
-  void moveTo(Vector2 target) {
+  /// Walk to [target] (tap-to-move).
+  void moveTo(Vector2 target, {double speed = Limits.walkSpeed}) {
     _target = target.clone();
+    _speed = speed;
+    _stuck = 0;
     final dx = target.x - position.x;
     if (dx.abs() > 1) facing = dx.sign;
+  }
+
+  /// Follow a networked position: glide there, or snap if it's far away.
+  void syncTo(Vector2 p) {
+    final d = p.distanceTo(position);
+    if (d > snapDistance) {
+      position.setFrom(p);
+      _target = null;
+      priority = p.y.round();
+    } else if (d > 0.5) {
+      // Arrive within about one network tick, never slower than walking.
+      moveTo(p, speed: math.max(Limits.walkSpeed, d / 0.12));
+    }
   }
 
   /// Shows [text] above the character for a few seconds.
   void say(String text) {
     _bubble?.removeFromParent();
-    add(_bubble = ChatBubble(text)..position = Vector2(size.x / 2, -6));
+    add(
+      _bubble = ChatBubble(text)
+        ..position = Vector2(size.x / 2, _isIt ? -32 : -6),
+    );
   }
 
   /// Pops [emote] above the head; it floats up and disappears.
@@ -88,7 +141,7 @@ class Character extends PositionComponent {
         position: Vector2(size.x / 2, -4),
         anchor: Anchor.bottomCenter,
         textRenderer: TextPaint(style: const TextStyle(fontSize: 30)),
-        priority: 1,
+        priority: 2,
         children: [
           MoveByEffect(
             Vector2(0, -28),
@@ -112,84 +165,68 @@ class Character extends PositionComponent {
   @override
   void update(double dt) {
     super.update(dt);
-    final target = _target;
-    if (target == null) {
+    final step = _plannedStep(dt);
+    if (step == null) {
+      walking = false;
       // Ease the legs back to standing.
-      _phase = _phase % math.pi;
+      _phase %= math.pi;
       _phase = _phase < 0.2 || _phase > math.pi - 0.2
           ? 0
           : _phase + dt * _stride;
       return;
     }
 
-    _phase += dt * _stride;
-    final toTarget = target - position;
-    final step = speed * dt;
-    if (toTarget.length <= step) {
-      position.setFrom(target);
-      _target = null;
-    } else {
-      position += toTarget.normalized() * step;
+    final before = position.clone();
+    var next = position + step;
+    final map = this.map;
+    if (map != null) {
+      final r = map.resolve((x: next.x, y: next.y));
+      next = Vector2(r.x, r.y);
     }
-    // Characters lower on screen are drawn in front.
+    position.setFrom(next);
+
+    final moved = position.distanceTo(before);
+    walking = moved > 0.01;
+    if (step.x.abs() > 0.01) facing = step.x.sign;
+    if (walking) _phase += dt * _stride;
     priority = position.y.round();
+
+    final target = _target;
+    if (target != null) {
+      if (position.distanceTo(target) < 0.5) {
+        _target = null;
+      } else if (moved < step.length * 0.2) {
+        // Pressed against something we can't slide around: give up.
+        _stuck += dt;
+        if (_stuck > 0.25) _target = null;
+      } else {
+        _stuck = 0;
+      }
+    }
+  }
+
+  Vector2? _plannedStep(double dt) {
+    if (input.length2 > 0) {
+      _target = null;
+      final dir = input.length2 > 1 ? input.normalized() : input;
+      return dir * Limits.walkSpeed * dt;
+    }
+    final target = _target;
+    if (target == null) return null;
+    final toTarget = target - position;
+    final max = _speed * dt;
+    return toTarget.length <= max ? toTarget : toTarget.normalized() * max;
   }
 
   @override
   void render(Canvas canvas) {
-    final cx = size.x / 2;
-    final feet = size.y - 2;
-    final swing = math.sin(_phase);
-    final bob = -swing.abs() * 2;
-
-    canvas.drawOval(
-      Rect.fromCenter(center: Offset(cx, feet), width: 30, height: 10),
-      _shadow,
+    avatar.paint(
+      canvas,
+      phase: _phase,
+      facing: facing,
+      selfRing: isSelf,
+      itRing: _isIt,
     );
-    if (isSelf) {
-      canvas.drawOval(
-        Rect.fromCenter(center: Offset(cx, feet), width: 42, height: 15),
-        _ring,
-      );
-    }
-
-    // Legs swing opposite each other.
-    for (final (dx, s) in [(-6.0, swing), (6.0, -swing)]) {
-      canvas.drawRRect(
-        RRect.fromRectAndRadius(
-          Rect.fromLTWH(cx + dx - 3, feet - 13 + s * 2.5, 6, 11 - s * 2.5),
-          const Radius.circular(3),
-        ),
-        _legs,
-      );
-    }
-
-    // Body.
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        Rect.fromLTWH(cx - 12, feet - 30 + bob, 24, 20),
-        const Radius.circular(9),
-      ),
-      _body,
-    );
-
-    // Head: face, hair cap, eyes looking where we walk.
-    final head = Offset(cx, feet - 40 + bob);
-    const r = 13.0;
-    canvas
-      ..drawCircle(head, r, _skin)
-      ..drawArc(
-        Rect.fromCircle(center: head.translate(0, -1), radius: r + 1),
-        math.pi,
-        math.pi,
-        true,
-        _hair,
-      );
-    final look = facing * 3;
-    for (final ex in [-4.5, 4.5]) {
-      canvas.drawCircle(head.translate(ex + look, 3), 1.9, _eyes);
-    }
-    canvas.drawCircle(head.translate(facing * 8, 7), 2.6, _blush);
   }
 }
 
@@ -198,7 +235,7 @@ class ChatBubble extends TextBoxComponent {
     : super(
         text: text,
         anchor: Anchor.bottomCenter,
-        priority: 2,
+        priority: 3,
         textRenderer: TextPaint(
           style: const TextStyle(color: Colors.black87, fontSize: 13),
         ),

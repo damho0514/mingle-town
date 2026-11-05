@@ -4,16 +4,18 @@ import 'package:flame/components.dart';
 import 'package:flame/events.dart';
 import 'package:mingle_protocol/mingle_protocol.dart';
 
-import 'world_layout.dart';
-
 /// The walkable floor: grass, paths, plaza, fountain, pond and flowers.
 /// Painted once into a [Picture]. Reports taps in world coordinates.
 class Ground extends PositionComponent with TapCallbacks {
   Ground({required this.onTap})
     : super(
         size: Vector2(Limits.worldWidth, Limits.worldHeight),
-        priority: -1 << 20,
+        priority: Ground.layer,
       );
+
+  /// Draw below everything. A plain literal on purpose: `-1 << 20` turns into
+  /// a huge *positive* number on the web, where shifts are unsigned 32-bit.
+  static const int layer = -1000000;
 
   final void Function(Vector2 worldPosition) onTap;
   late final Picture _picture;
@@ -21,7 +23,7 @@ class Ground extends PositionComponent with TapCallbacks {
   @override
   Future<void> onLoad() async {
     final recorder = PictureRecorder();
-    _paint(Canvas(recorder), WorldLayout.instance);
+    _paint(Canvas(recorder), WorldMap.instance);
     _picture = recorder.endRecording();
   }
 
@@ -37,7 +39,7 @@ class Ground extends PositionComponent with TapCallbacks {
     super.onRemove();
   }
 
-  void _paint(Canvas canvas, WorldLayout layout) {
+  void _paint(Canvas canvas, WorldMap layout) {
     // Grass with a subtle checker so movement reads clearly.
     const tile = 80.0;
     final light = Paint()..color = const Color(0xFF8BC34A);
@@ -50,8 +52,8 @@ class Ground extends PositionComponent with TapCallbacks {
     }
 
     // Paths crossing at the plaza.
-    final c = WorldLayout.center;
-    const half = WorldLayout.pathHalfWidth;
+    const c = WorldMap.center;
+    const half = WorldMap.pathHalfWidth;
     final path = Paint()..color = const Color(0xFFE8D5A9);
     final pathEdge = Paint()
       ..color = const Color(0xFFD4BE8A)
@@ -71,12 +73,12 @@ class Ground extends PositionComponent with TapCallbacks {
     canvas
       ..drawCircle(
         center,
-        WorldLayout.plazaRadius,
+        WorldMap.plazaRadius,
         Paint()..color = const Color(0xFFD7CCC8),
       )
       ..drawCircle(
         center,
-        WorldLayout.plazaRadius,
+        WorldMap.plazaRadius,
         Paint()
           ..color = const Color(0xFFBCAAA4)
           ..style = PaintingStyle.stroke
@@ -84,7 +86,7 @@ class Ground extends PositionComponent with TapCallbacks {
       )
       ..drawCircle(
         center,
-        WorldLayout.plazaRadius * 0.6,
+        WorldMap.plazaRadius * 0.6,
         Paint()
           ..color = const Color(0x22000000)
           ..style = PaintingStyle.stroke
@@ -92,21 +94,21 @@ class Ground extends PositionComponent with TapCallbacks {
       )
       ..drawCircle(
         center,
-        WorldLayout.fountainRadius,
+        WorldMap.fountainRadius,
         Paint()..color = const Color(0xFF90A4AE),
       )
       ..drawCircle(
         center,
-        WorldLayout.fountainRadius - 9,
+        WorldMap.fountainRadius - 9,
         Paint()..color = const Color(0xFF4FC3F7),
       )
       ..drawCircle(center, 10, Paint()..color = const Color(0xFFB3E5FC));
 
     // Pond.
     final pond = Rect.fromCenter(
-      center: Offset(WorldLayout.pondCenter.x, WorldLayout.pondCenter.y),
-      width: WorldLayout.pondRadii.x * 2,
-      height: WorldLayout.pondRadii.y * 2,
+      center: Offset(WorldMap.pondCenter.x, WorldMap.pondCenter.y),
+      width: WorldMap.pondRadii.x * 2,
+      height: WorldMap.pondRadii.y * 2,
     );
     canvas
       ..drawOval(pond.inflate(8), Paint()..color = const Color(0xFFA1887F))
@@ -129,7 +131,7 @@ class Ground extends PositionComponent with TapCallbacks {
     final pollen = Paint()..color = const Color(0xFFFFEB3B);
     for (final (p, color) in layout.flowers) {
       final o = Offset(p.x, p.y);
-      final petal = Paint()..color = color;
+      final petal = Paint()..color = Color(color);
       canvas.drawCircle(o.translate(0, 3), 2, stem);
       for (final d in const [
         Offset(-3, 0),

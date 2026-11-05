@@ -1,9 +1,12 @@
+import 'appearance.dart';
+
 /// Snapshot of a player as seen by every client.
 class PlayerState {
   const PlayerState({
     required this.id,
     required this.name,
     required this.color,
+    this.hat = Hat.none,
     required this.x,
     required this.y,
   });
@@ -13,6 +16,7 @@ class PlayerState {
 
   /// ARGB color value.
   final int color;
+  final Hat hat;
   final double x;
   final double y;
 
@@ -20,6 +24,7 @@ class PlayerState {
     id: id,
     name: name,
     color: color,
+    hat: hat,
     x: x ?? this.x,
     y: y ?? this.y,
   );
@@ -28,6 +33,7 @@ class PlayerState {
     'id': id,
     'name': name,
     'color': color,
+    'hat': hat.name,
     'x': x,
     'y': y,
   };
@@ -36,6 +42,7 @@ class PlayerState {
     id: json['id'] as String,
     name: json['name'] as String,
     color: json['color'] as int,
+    hat: Hat.tryParse(json['hat'] as String? ?? '') ?? Hat.none,
     x: (json['x'] as num).toDouble(),
     y: (json['y'] as num).toDouble(),
   );
@@ -46,9 +53,10 @@ class PlayerState {
       other.id == id &&
       other.name == name &&
       other.color == color &&
+      other.hat == hat &&
       other.x == x &&
       other.y == y;
 
   @override
-  int get hashCode => Object.hash(id, name, color, x, y);
+  int get hashCode => Object.hash(id, name, color, hat, x, y);
 }

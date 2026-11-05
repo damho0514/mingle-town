@@ -1,95 +1,194 @@
+import 'dart:async';
 import 'dart:math';
 
 import 'package:mingle_protocol/mingle_protocol.dart';
 
-typedef SendFn = void Function(ServerMessage message);
+import 'lobby.dart';
+import 'session.dart';
 
-/// A single shared space. Holds every joined player and fans out updates.
-///
-/// Transport-agnostic: each connection is a [Session] created by [connect].
+/// A shared space: tracks its players, fans out updates and runs tag rounds.
 class Room {
-  Room({Random? random, DateTime Function()? clock})
-    : _random = random ?? Random(),
-      _clock = clock ?? DateTime.now;
+  Room(this.id, this._lobby);
 
-  final Random _random;
-  final DateTime Function() _clock;
+  final String id;
+  final Lobby _lobby;
   final Map<String, Session> _joined = {};
-  int _nextId = 1;
 
-  static const _palette = [
-    0xFFFF7043,
-    0xFF42A5F5,
-    0xFFAB47BC,
-    0xFFFFCA28,
-    0xFF26A69A,
-    0xFFEC407A,
-    0xFF8D6E63,
-    0xFF5C6BC0,
-  ];
-
-  /// Max accepted frame size in characters; larger frames are dropped.
-  static const maxFrameLength = 1024;
+  // Tag round state.
+  String? _itId;
+  DateTime? _tagEndsAt;
+  DateTime _tagCooldownUntil = DateTime.fromMillisecondsSinceEpoch(0);
+  Timer? _tagTimer;
 
   int get playerCount => _joined.length;
+  bool get tagRunning => _tagEndsAt != null;
+  String? get itId => _itId;
 
-  Session connect(SendFn send) => Session._(this, send);
+  Iterable<PlayerState> get players => _joined.values.map((s) => s.player!);
 
-  void _join(Session session, String rawName) {
-    final id = 'p${_nextId++}';
+  void join(Session session, JoinMessage message) {
+    final random = _lobby.random;
+    final id = _lobby.nextPlayerId();
     // Spawn on a ring around the central plaza's fountain.
-    final angle = _random.nextDouble() * 2 * pi;
-    final distance = 90 + _random.nextDouble() * 70;
+    final angle = random.nextDouble() * 2 * pi;
+    final distance = 90 + random.nextDouble() * 70;
     final player = PlayerState(
       id: id,
-      name: _sanitizeName(rawName, id),
-      color: _palette[_random.nextInt(_palette.length)],
-      x: Limits.worldWidth / 2 + cos(angle) * distance,
-      y: Limits.worldHeight / 2 + sin(angle) * distance,
+      name: _sanitizeName(message.name, id),
+      color: Palette.isValid(message.color ?? 0)
+          ? message.color!
+          : Palette.colors[random.nextInt(Palette.colors.length)],
+      hat: message.hat,
+      x: WorldMap.center.x + cos(angle) * distance,
+      y: WorldMap.center.y + sin(angle) * distance,
     );
-    session._player = player;
+    session
+      ..player = player
+      ..room = this;
     _joined[id] = session;
 
-    session._send(
+    session.send(
       WelcomeMessage(
         selfId: id,
-        players: [for (final s in _joined.values) s._player!],
+        room: this.id,
+        players: players.toList(),
+        tag: tagRunning
+            ? TagMessage(
+                phase: TagPhase.started,
+                itId: _itId,
+                remainingMs: _remainingMs,
+              )
+            : null,
       ),
     );
     _broadcast(PlayerJoinedMessage(player), except: session);
   }
 
-  void _move(Session session, double x, double y) {
-    final player = session._player!.copyWith(
-      x: x.clamp(0, Limits.worldWidth).toDouble(),
-      y: y.clamp(0, Limits.worldHeight).toDouble(),
-    );
-    session._player = player;
+  void move(Session session, double x, double y) {
+    final p = WorldMap.instance.resolve((x: x, y: y));
+    final player = session.player!.copyWith(x: p.x, y: p.y);
+    session.player = player;
     _broadcast(
       PlayerMovedMessage(player.id, player.x, player.y),
       except: session,
     );
+    if (tagRunning) _checkTag(player);
   }
 
-  void _chat(Session session, String rawText) {
+  void chat(Session session, String rawText) {
     final text = _truncate(rawText.trim(), Limits.maxChatLength);
     if (text.isEmpty) return;
-    _broadcast(PlayerChatMessage(session._player!.id, text));
+    _broadcast(PlayerChatMessage(session.player!.id, text));
   }
 
-  void _emote(Session session, Emote emote) {
-    _broadcast(PlayerEmotedMessage(session._player!.id, emote));
+  void emote(Session session, Emote emote) {
+    _broadcast(PlayerEmotedMessage(session.player!.id, emote));
   }
 
-  void _leave(Session session) {
-    final player = session._player;
+  void leave(Session session) {
+    final player = session.player;
     if (player == null || _joined.remove(player.id) == null) return;
     _broadcast(PlayerLeftMessage(player.id));
+
+    if (!tagRunning) return;
+    if (playerCount < TagRules.minPlayers) {
+      _endTag(loserId: null);
+    } else if (player.id == _itId) {
+      // The tagger ran away: hand "it" to someone else.
+      _itId = _randomPlayerId();
+      _tagCooldownUntil = _lobby.clock().add(TagRules.cooldown);
+      _broadcast(
+        TagMessage(
+          phase: TagPhase.tagged,
+          itId: _itId,
+          remainingMs: _remainingMs,
+        ),
+      );
+    }
   }
+
+  // ---------------------------------------------------------------------------
+  // Tag
+  // ---------------------------------------------------------------------------
+
+  void startTag(Session session) {
+    if (tagRunning) {
+      session.send(const ErrorMessage('tag already running'));
+      return;
+    }
+    if (playerCount < TagRules.minPlayers) {
+      session.send(const ErrorMessage('need more players'));
+      return;
+    }
+    final now = _lobby.clock();
+    _itId = _randomPlayerId();
+    _tagEndsAt = now.add(TagRules.roundLength);
+    // Give everyone a head start before the first tag can land.
+    _tagCooldownUntil = now.add(TagRules.cooldown);
+    _tagTimer = _lobby.timer(
+      TagRules.roundLength,
+      () => _endTag(loserId: _itId),
+    );
+    _broadcast(
+      TagMessage(
+        phase: TagPhase.started,
+        itId: _itId,
+        remainingMs: _remainingMs,
+      ),
+    );
+  }
+
+  void _checkTag(PlayerState mover) {
+    final now = _lobby.clock();
+    if (now.isBefore(_tagCooldownUntil)) return;
+    final it = _joined[_itId]?.player;
+    if (it == null) return;
+
+    final candidates = mover.id == it.id
+        ? players.where((p) => p.id != it.id)
+        : [mover];
+    for (final target in candidates) {
+      final d = sqrt(pow(target.x - it.x, 2) + pow(target.y - it.y, 2));
+      if (d <= TagRules.reach) {
+        _itId = target.id;
+        _tagCooldownUntil = now.add(TagRules.cooldown);
+        _broadcast(
+          TagMessage(
+            phase: TagPhase.tagged,
+            itId: target.id,
+            byId: it.id,
+            remainingMs: _remainingMs,
+          ),
+        );
+        return;
+      }
+    }
+  }
+
+  void _endTag({required String? loserId}) {
+    _tagTimer?.cancel();
+    _tagTimer = null;
+    _tagEndsAt = null;
+    _itId = null;
+    _broadcast(TagMessage(phase: TagPhase.ended, itId: loserId));
+  }
+
+  int get _remainingMs {
+    final endsAt = _tagEndsAt;
+    if (endsAt == null) return 0;
+    return max(0, endsAt.difference(_lobby.clock()).inMilliseconds);
+  }
+
+  String _randomPlayerId() {
+    final ids = _joined.keys.toList();
+    return ids[_lobby.random.nextInt(ids.length)];
+  }
+
+  // ---------------------------------------------------------------------------
 
   void _broadcast(ServerMessage message, {Session? except}) {
     for (final s in _joined.values) {
-      if (!identical(s, except)) s._send(message);
+      if (!identical(s, except)) s.send(message);
     }
   }
 
@@ -101,76 +200,9 @@ class Room {
     return name.isEmpty ? 'guest-$fallbackId' : name;
   }
 
-  /// Truncates by user-perceived length without splitting surrogate pairs.
+  /// Truncates by code point without splitting surrogate pairs.
   static String _truncate(String s, int max) {
     final runes = s.runes;
     return runes.length <= max ? s : String.fromCharCodes(runes.take(max));
-  }
-}
-
-/// One client connection to a [Room].
-class Session {
-  Session._(this._room, this._send);
-
-  final Room _room;
-  final SendFn _send;
-  PlayerState? _player;
-  bool _closed = false;
-  final List<DateTime> _recentSocial = [];
-
-  PlayerState? get player => _player;
-
-  /// Handles one raw text frame from the client.
-  void handle(String raw) {
-    if (_closed) return;
-    if (raw.length > Room.maxFrameLength) {
-      _send(const ErrorMessage('frame too large'));
-      return;
-    }
-    final ClientMessage message;
-    try {
-      message = ClientMessage.decode(raw);
-    } on ProtocolException catch (e) {
-      _send(ErrorMessage(e.message));
-      return;
-    }
-
-    switch (message) {
-      case JoinMessage(:final name):
-        if (_player != null) {
-          _send(const ErrorMessage('already joined'));
-        } else {
-          _room._join(this, name);
-        }
-      case MoveMessage(:final x, :final y) when _player != null:
-        _room._move(this, x, y);
-      case ChatMessage(:final text) when _player != null:
-        if (_allowSocial()) _room._chat(this, text);
-      case EmoteMessage(:final emote) when _player != null:
-        if (_allowSocial()) _room._emote(this, emote);
-      case MoveMessage() || ChatMessage() || EmoteMessage():
-        _send(const ErrorMessage('join first'));
-    }
-  }
-
-  /// Sliding-window limit on chat + emotes so one client can't flood the room.
-  bool _allowSocial() {
-    final now = _room._clock();
-    _recentSocial.removeWhere(
-      (t) => now.difference(t) >= SocialRateLimit.window,
-    );
-    if (_recentSocial.length >= SocialRateLimit.burst) {
-      _send(const ErrorMessage('slow down'));
-      return false;
-    }
-    _recentSocial.add(now);
-    return true;
-  }
-
-  /// Call when the underlying connection ends. Idempotent.
-  void close() {
-    if (_closed) return;
-    _closed = true;
-    _room._leave(this);
   }
 }

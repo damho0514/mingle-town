@@ -1,12 +1,13 @@
 import 'dart:ui';
 
 import 'package:flame/components.dart';
+import 'package:mingle_protocol/mingle_protocol.dart';
 
 /// A tree whose base sits at [position]; depth-sorted with characters.
 class Tree extends PositionComponent {
-  Tree(Vector2 base)
+  Tree(WorldPoint base)
     : super(
-        position: base,
+        position: Vector2(base.x, base.y),
         size: Vector2(64, 90),
         anchor: Anchor.bottomCenter,
         priority: base.y.round(),
