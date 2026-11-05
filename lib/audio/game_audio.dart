@@ -27,6 +27,9 @@ abstract class GameAudio {
   void play(Sfx sfx);
   void startMusic();
   void stopMusic();
+
+  /// Releases every native player. The instance can't be used afterwards.
+  Future<void> dispose();
 }
 
 /// No-op implementation for tests and headless runs.
@@ -47,6 +50,42 @@ class SilentAudio implements GameAudio {
   void startMusic() {}
   @override
   void stopMusic() {}
+  @override
+  Future<void> dispose() async {}
+}
+
+/// A fixed set of players for one sound, used round-robin.
+///
+/// Never creates players on demand: if every player is still busy starting
+/// up, the sound is skipped. That bounds native resources no matter how
+/// often sounds fire (the previous create-a-player-per-sound approach leaked
+/// until the Android app ran out of memory).
+class SfxChannel {
+  SfxChannel(this.size, this._restart);
+
+  final int size;
+  final Future<void> Function(int index) _restart;
+  int _next = 0;
+  int _inFlight = 0;
+
+  /// Starts the sound on the next player; returns false if it was dropped.
+  bool trigger() {
+    if (_inFlight >= size) return false;
+    final index = _next;
+    _next = (_next + 1) % size;
+    _inFlight++;
+    unawaited(
+      _restart(index)
+          .then(
+            (_) {},
+            onError: (Object e) {
+              debugPrint('audio error: $e');
+            },
+          )
+          .whenComplete(() => _inFlight--),
+    );
+    return true;
+  }
 }
 
 class FlameGameAudio implements GameAudio {
@@ -54,11 +93,13 @@ class FlameGameAudio implements GameAudio {
 
   static const _musicFile = 'bgm.wav';
   static const _musicVolume = 0.3;
+  static bool _bgmInitialized = false;
 
   final ValueNotifier<bool> _muted;
-  AudioPool? _steps;
+  final Map<Sfx, SfxChannel> _channels = {};
+  final List<AudioPlayer> _players = [];
   bool _musicWanted = false;
-  static bool _bgmInitialized = false;
+  bool _disposed = false;
 
   @override
   ValueListenable<bool> get muted => _muted;
@@ -73,12 +114,29 @@ class FlameGameAudio implements GameAudio {
 
   @override
   Future<void> load() async {
+    final context = AudioContextConfig(
+      focus: AudioContextConfigFocus.mixWithOthers,
+    ).build();
     try {
-      await FlameAudio.audioCache.loadAll([
-        for (final s in Sfx.values) s.file,
-        _musicFile,
-      ]);
-      _steps = await FlameAudio.createPool(Sfx.step.file, maxPlayers: 3);
+      for (final sfx in Sfx.values) {
+        final players = <AudioPlayer>[];
+        for (var i = 0; i < (sfx == Sfx.step ? 3 : 2); i++) {
+          final player = AudioPlayer()..audioCache = FlameAudio.audioCache;
+          await player.setPlayerMode(PlayerMode.lowLatency);
+          await player.setAudioContext(context);
+          await player.setReleaseMode(ReleaseMode.stop);
+          await player.setSource(AssetSource(sfx.file));
+          await player.setVolume(sfx.volume);
+          players.add(player);
+        }
+        _players.addAll(players);
+        _channels[sfx] = SfxChannel(players.length, (i) async {
+          final p = players[i];
+          await p.stop();
+          await p.resume();
+        });
+      }
+      await FlameAudio.audioCache.load(_musicFile);
       if (!_bgmInitialized) {
         await FlameAudio.bgm.initialize();
         _bgmInitialized = true;
@@ -90,13 +148,8 @@ class FlameGameAudio implements GameAudio {
 
   @override
   void play(Sfx sfx) {
-    if (_muted.value) return;
-    final steps = _steps;
-    if (sfx == Sfx.step && steps != null) {
-      _guard(steps.start(volume: sfx.volume));
-    } else {
-      _guard(FlameAudio.play(sfx.file, volume: sfx.volume));
-    }
+    if (_muted.value || _disposed) return;
+    _channels[sfx]?.trigger();
   }
 
   @override
@@ -109,6 +162,15 @@ class FlameGameAudio implements GameAudio {
   void stopMusic() {
     _musicWanted = false;
     _guard(FlameAudio.bgm.stop());
+  }
+
+  @override
+  Future<void> dispose() async {
+    _disposed = true;
+    _channels.clear();
+    final players = List.of(_players);
+    _players.clear();
+    await Future.wait(players.map((p) => p.dispose().catchError((_) {})));
   }
 
   Future<void> _playMusic() =>

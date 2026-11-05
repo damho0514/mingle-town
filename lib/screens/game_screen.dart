@@ -73,6 +73,7 @@ class _GameScreenState extends State<GameScreen> {
   void dispose() {
     _leaving = true;
     _audio.stopMusic();
+    unawaited(_audio.dispose());
     widget.connection.close();
     _noticeSub?.cancel();
     _noticeTimer?.cancel();
