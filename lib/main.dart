@@ -1,7 +1,6 @@
-import 'package:flame/game.dart';
 import 'package:flutter/material.dart';
 
-import 'game/mingle_town_game.dart';
+import 'screens/lobby_screen.dart';
 
 void main() {
   runApp(const MingleTownApp());
@@ -15,9 +14,11 @@ class MingleTownApp extends StatelessWidget {
     return MaterialApp(
       title: 'Mingle Town',
       debugShowCheckedModeBanner: false,
-      home: Scaffold(
-        body: GameWidget(game: MingleTownGame()),
+      theme: ThemeData(
+        colorSchemeSeed: const Color(0xFF8BC34A),
+        useMaterial3: true,
       ),
+      home: const LobbyScreen(),
     );
   }
 }

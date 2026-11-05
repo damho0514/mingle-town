@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Protocol
+        working-directory: packages/mingle_protocol
+        run: |
+          dart pub get
+          dart analyze --fatal-infos
+          dart test
+
+      - name: Server
+        working-directory: server
+        run: |
+          dart pub get
+          dart analyze --fatal-infos
+          dart test
+
+      - name: App
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test
